@@ -8,6 +8,7 @@ from . import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+
 class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None, errors=None):
         if user_input is not None:
@@ -21,6 +22,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
             step_id="user", data_schema=vol.Schema(
                 {
                     vol.Required("url", default="https://localhost:19000/api/willow"): cv.string,
+                    vol.Optional("backup_url", default=""): cv.string,
                     vol.Required("cert_validation", default=True): cv.boolean,
                     vol.Optional("model", default="medium"): cv.string,
                     vol.Optional("detect_language", default=False): cv.boolean,
@@ -37,6 +39,7 @@ class ConfigFlowHandler(ConfigFlow, domain=DOMAIN):
     def async_get_options_flow(config_entry):
         return OptionsFlowHandler(config_entry)
 
+
 class OptionsFlowHandler(OptionsFlow):
     def __init__(self, config_entry: ConfigEntry):
         self.config_entry = config_entry
@@ -46,6 +49,7 @@ class OptionsFlowHandler(OptionsFlow):
             step_id="user", data_schema=vol.Schema(
                 {
                     vol.Required("url", default=self.config_entry.data["url"]): cv.string,
+                    vol.Optional("backup_url", default=self.config_entry.data.get("backup_url", "")): cv.string,
                     vol.Required("cert_validation", default=self.config_entry.data["cert_validation"]): cv.boolean,
                     vol.Optional("model", default=self.config_entry.data["model"]): cv.string,
                     vol.Optional("detect_language", default=self.config_entry.data["detect_language"]): cv.boolean,
@@ -57,7 +61,7 @@ class OptionsFlowHandler(OptionsFlow):
             ), errors=errors
         )
 
-    async def async_step_user(self, user_input: None, errors=None):
+    async def async_step_user(self, user_input=None, errors=None):
         try:
             self.hass.config_entries.async_update_entry(self.config_entry, data=user_input)
             return self.async_create_entry(title=None, data=None)
