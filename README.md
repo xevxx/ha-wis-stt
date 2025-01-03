@@ -1,4 +1,6 @@
 # Willow Inference Server speech-to-text implementation for Home Assistant
+I modifed this to include a backup server url if my primary was down
+
 This is a custom component implementation for [Home Assistant](https://www.home-assistant.io/) that adds [Willow Inference Server](https://github.com/toverainc/willow-inference-server) as an STT.
 
 ## Installation
