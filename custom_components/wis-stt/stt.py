@@ -1,7 +1,6 @@
 import aiohttp
 import logging
 from collections.abc import AsyncIterable
-from webbrowser import get
 from homeassistant.components import stt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -11,6 +10,7 @@ from . import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
+
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -18,9 +18,11 @@ async def async_setup_entry(
 ) -> None:
     async_add_entities([WISSTT(hass, config_entry)])
 
+
 class WISSTT(stt.SpeechToTextEntity):
     def __init__(self, hass: HomeAssistant, config_entry: ConfigEntry) -> None:
         self.url: str = config_entry.data["url"]
+        self.backup_url: str = config_entry.data.get("backup_url", "")
         self.cert_validation: bool = config_entry.data["cert_validation"]
         self.model: str = config_entry.data["model"]
         self.detect_language: bool = config_entry.data["detect_language"]
@@ -56,34 +58,38 @@ class WISSTT(stt.SpeechToTextEntity):
     def supported_channels(self) -> list[stt.AudioChannels]:
         return [stt.AudioChannels.CHANNEL_MONO]
 
+    async def _send_request(self, session, stream, endpoint: str):
+        params = {
+            'model': self.model,
+            'detect_language': str(self.detect_language),
+            'return_language': self.language,
+            'force_language': self.language,
+            'beam_size': self.beam_size,
+            'speaker': self.speaker,
+            'save_audio': str(self.save_audio),
+        }
+        async with session.post(endpoint, params=params, data=stream) as resp:
+            return await resp.json(content_type=None)
+
     async def async_process_audio_stream(
         self, metadata: stt.SpeechMetadata, stream: AsyncIterable[bytes]
     ) -> stt.SpeechResult:
-        _LOGGER.debug("process_audio_stream start")
+        _LOGGER.debug("Processing audio stream")
 
-        def session_creator(verify_ssl=None):
-            if verify_ssl:
-                return aiohttp.ClientSession()
-            else:
-                return aiohttp.ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False))
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self.cert_validation)) as session:
+            try:
+                text = await self._send_request(session, stream, self.url)
+            except Exception as e:
+                _LOGGER.warning(f"Primary endpoint failed: {e}")
+                if self.backup_url:
+                    try:
+                        text = await self._send_request(session, stream, self.backup_url)
+                    except Exception as backup_e:
+                        _LOGGER.error(f"Backup endpoint failed: {backup_e}")
+                        raise backup_e
+                else:
+                    raise e
 
-        async def stream_reader(stream=None):
-            async for chunk in stream:
-                yield chunk
+        _LOGGER.info(f"Audio processing complete: {text}")
 
-        async with session_creator(self.cert_validation) as session:
-            session.headers.update({'x-audio-codec': 'pcm'})
-            session.headers.update({'x-audio-channel': '1'})
-            session.headers.update({'x-audio-bits': '16'})
-            session.headers.update({'x-audio-sample-rate': '16000'})
-            params = {'model': self.model, 'detect_language': str(self.detect_language),
-                      'return_language': self.language, 'force_language': self.language,
-                      'beam_size': self.beam_size, 'speaker':self.speaker, 'save_audio': str(self.save_audio)}
-            async with session.post(self.url, params=params, data=stream_reader(stream=stream)) as resp:
-                text = await resp.json(content_type=None)
-        
-        _LOGGER.info(f"process_audio_stream end: {text}")
-
-        text = text["text"]
-
-        return stt.SpeechResult(text, stt.SpeechResultState.SUCCESS)
+        return stt.SpeechResult(text["text"], stt.SpeechResultState.SUCCESS)
