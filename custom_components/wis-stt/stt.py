@@ -1,6 +1,7 @@
 import aiohttp
 import logging
 from collections.abc import AsyncIterable
+from webbrowser import get
 from homeassistant.components import stt
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -58,38 +59,70 @@ class WISSTT(stt.SpeechToTextEntity):
     def supported_channels(self) -> list[stt.AudioChannels]:
         return [stt.AudioChannels.CHANNEL_MONO]
 
-    async def _send_request(self, session, stream, endpoint: str):
-        params = {
-            'model': self.model,
-            'detect_language': str(self.detect_language),
-            'return_language': self.language,
-            'force_language': self.language,
-            'beam_size': self.beam_size,
-            'speaker': self.speaker,
-            'save_audio': str(self.save_audio),
-        }
-        async with session.post(endpoint, params=params, data=stream) as resp:
-            return await resp.json(content_type=None)
-
     async def async_process_audio_stream(
-        self, metadata: stt.SpeechMetadata, stream: AsyncIterable[bytes]
-    ) -> stt.SpeechResult:
-        _LOGGER.debug("Processing audio stream")
+    self, metadata: stt.SpeechMetadata, stream: AsyncIterable[bytes]
+) -> stt.SpeechResult:
+        _LOGGER.debug("process_audio_stream start")
 
-        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=self.cert_validation)) as session:
-            try:
-                text = await self._send_request(session, stream, self.url)
-            except Exception as e:
-                _LOGGER.warning(f"Primary endpoint failed: {e}")
-                if self.backup_url:
+        def session_creator(verify_ssl=None):
+            if verify_ssl:
+                return aiohttp.ClientSession()
+            else:
+                return aiohttp.ClientSession(connector=aiohttp.TCPConnector(verify_ssl=False))
+
+        async def stream_reader(stream=None):
+            async for chunk in stream:
+                yield chunk
+
+        async def attempt_stream(url: str):
+            async with session_creator(self.cert_validation) as session:
+                session.headers.update({'x-audio-codec': 'pcm'})
+                session.headers.update({'x-audio-channel': '1'})
+                session.headers.update({'x-audio-bits': '16'})
+                session.headers.update({'x-audio-sample-rate': '16000'})
+                params = {
+                    'model': self.model,
+                    'detect_language': str(self.detect_language),
+                    'return_language': self.language,
+                    'force_language': self.language,
+                    'beam_size': self.beam_size,
+                    'speaker': self.speaker,
+                    'save_audio': str(self.save_audio)
+                }
+                async with session.post(url, params=params, data=stream_reader(stream=stream)) as resp:
+                    _LOGGER.debug(f"HTTP Response Status: {resp.status}")
+                    raw_response = await resp.text()
+                    _LOGGER.debug(f"Raw Response: {raw_response}")
+                    
+                    if resp.status != 200:
+                        raise Exception(f"HTTP error: {resp.status}")
+
                     try:
-                        text = await self._send_request(session, stream, self.backup_url)
-                    except Exception as backup_e:
-                        _LOGGER.error(f"Backup endpoint failed: {backup_e}")
-                        raise backup_e
-                else:
-                    raise e
+                        text = await resp.json(content_type=None)
+                        return text
+                    except Exception as e:
+                        _LOGGER.error(f"Failed to parse JSON response: {e}")
+                        raise
 
-        _LOGGER.info(f"Audio processing complete: {text}")
+        try:
+            _LOGGER.debug(f"Attempting STT with primary URL: {self.url}")
+            text = await attempt_stream(self.url)
+        except Exception as primary_error:
+            _LOGGER.warning(f"Primary URL failed: {primary_error}")
+            if hasattr(self, 'backup_url') and self.backup_url:
+                try:
+                    _LOGGER.debug(f"Attempting STT with backup URL: {self.backup_url}")
+                    text = await attempt_stream(self.backup_url)
+                except Exception as backup_error:
+                    _LOGGER.error(f"Backup URL also failed: {backup_error}")
+                    raise backup_error
+            else:
+                raise primary_error
+
+        _LOGGER.info(f"process_audio_stream end: {text}")
+
+        if "text" not in text:
+            _LOGGER.error("Invalid response: Missing 'text' key in response")
+            raise ValueError("Invalid response: Missing 'text' key in response")
 
         return stt.SpeechResult(text["text"], stt.SpeechResultState.SUCCESS)
